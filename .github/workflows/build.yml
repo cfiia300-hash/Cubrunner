@@ -22,19 +22,34 @@ jobs:
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
           npx cap init "Куб-раннер" com.cfii.cuberunner --web-dir www
           npx cap add android
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" android/app/build.gradle
       - name: Generate icons
         run: |
           mkdir assets
           cp icon-only.png icon-foreground.png icon-background.png assets/
           npm install @capacitor/assets@3
           npx capacitor-assets generate --android
-      - name: Build APK
+      - name: Build release APK
         run: |
           npx cap sync android
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KS_PASS" ]; then
+            echo "Не найдены секреты KEYSTORE_B64 или KEYSTORE_PASSWORD"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > release.p12
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          cd android/app/build/outputs/apk/release
+          "$BT/zipalign" -p 4 app-release-unsigned.apk aligned.apk
+          "$BT/apksigner" sign --ks "$GITHUB_WORKSPACE/release.p12" --ks-pass env:KS_PASS --out "$GITHUB_WORKSPACE/cuberunner.apk" aligned.apk
       - uses: actions/upload-artifact@v4
         with:
           name: runner-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: cuberunner.apk
