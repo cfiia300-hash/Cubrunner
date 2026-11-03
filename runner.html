@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Куб-раннер</title>
+<style>
+:root{--bg:#8fd3f0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b2447}}
+:root[data-theme="dark"]{--bg:#1b2447}
+html,body{height:100%;margin:0;background:var(--bg);overflow:hidden;-webkit-user-select:none;user-select:none}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+const P = dark
+  ? {sky:'#1b2447', ground:'#2b2233', grass:'#2f6b4a', obs:'#9aa0bd', fl:'#a98be0', text:'#e8ecff', coinText:'#ffd34d'}
+  : {sky:'#8fd3f0', ground:'#5a4632', grass:'#50aa50', obs:'#3c3c46', fl:'#6e4696', text:'#14202b', coinText:'#8a5a00'};
+const MAXH = 14, ROT = 7, LEVEL = 300;
+let W, H, U, GY, PL, PX, G, JMIN, BOOST, MAXJ, SP0, SP1, CR;
+let best = 0, total = 0, held = false, buf = 0, g;
+
+try { const s = JSON.parse(localStorage.getItem('runner') || '{}'); best = s.best | 0; total = s.coins | 0; } catch (e) {}
+function save() { try { localStorage.setItem('runner', JSON.stringify({best: best, coins: total})); } catch (e) {} }
+
+// ---- Звуки (синтезируются прямо в браузере, файлы не нужны) ----
+let ac = null, muted = false;
+try { muted = localStorage.getItem('runner_mute') === '1'; } catch (e) {}
+function audio() {
+  if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (ac && ac.state === 'suspended') ac.resume();
+}
+function tone(f0, f1, dur, type, vol, delay) {
+  if (!ac || muted) return;
+  const t = ac.currentTime + (delay || 0), o = ac.createOscillator(), gn = ac.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  gn.gain.setValueAtTime(vol, t);
+  gn.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(gn); gn.connect(ac.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  jump() { tone(320, 640, 0.12, 'square', 0.08); },
+  coin() { tone(988, 988, 0.07, 'square', 0.07); tone(1319, 1319, 0.14, 'square', 0.07, 0.07); },
+  die() { tone(380, 50, 0.55, 'sawtooth', 0.12); tone(190, 40, 0.55, 'square', 0.06); }
+};
+function muteRect() { const s = U * .1; return {x: W - s - U * .03, y: U * .03, w: s, h: s}; }
+function inMute(e) {
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, m = muteRect();
+  return x >= m.x - 10 && x <= m.x + m.w + 10 && y >= m.y - 10 && y <= m.y + m.h + 10;
+}
+
+function resize() {
+  const r = cv.getBoundingClientRect(), d = Math.min(devicePixelRatio || 1, 2);
+  cv.width = r.width * d; cv.height = r.height * d;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  W = r.width; H = r.height; U = Math.min(W, H);
+  GY = H * .75; PL = U * .12; PX = W * .15;
+  G = H * .0012; JMIN = -H * .0155; BOOST = H * .0009; MAXJ = H * .24;
+  SP0 = U * .005; SP1 = U * .018; CR = U * .03;
+  g = newGame();
+}
+
+function newGame() {
+  return {y: GY - PL, vy: 0, ground: true, hold: MAXH, angle: 0, obs: [], coins: [],
+          run: 0, score: 0, alive: true, started: false, gap: W * .7, dead: 0};
+}
+const diff = () => Math.min(1, g.score / LEVEL);
+const speed = () => SP0 + (SP1 - SP0) * diff();
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+function spawn(x) {
+  const d = diff(), w = rnd(U * .07, U * .11);
+  if (x === undefined) x = W + w;
+  let h = rnd(U * .08, U * .14), y = GY - h, floating = false;
+  if (Math.random() < .25 + .25 * d) {
+    const fh = rnd(U * .05, U * .08), gmin = PL * 1.3, gmax = MAXJ * .85 - fh;
+    if (gmax >= gmin) { h = fh; y = GY - rnd(gmin, gmax) - fh; floating = true; }
+  }
+  g.obs.push({x: x, y: y, w: w, h: h});
+  if (floating && Math.random() < .8) {
+    const n = Math.random() < .5 ? 1 : 2;
+    for (let i = 0; i < n; i++) g.coins.push({x: x + w * (i + 1) / (n + 1), y: y - CR * 1.8, ph: Math.random() * 6});
+  }
+  return w;
+}
+
+function wave() {
+  const d = diff(), w = spawn();
+  if (Math.random() < .5 * d) spawn(W + w + U * .1 + w);
+  g.gap = speed() * rnd(60 - 28 * d, 90 - 35 * d) + w;
+}
+
+const hit = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+function step() {
+  if (!g.started || !g.alive) return;
+  const sp = speed();
+  g.obs.forEach(o => o.x -= sp);
+  g.coins.forEach(c => c.x -= sp);
+  g.obs = g.obs.filter(o => o.x + o.w > 0);
+  g.coins = g.coins.filter(c => c.x > -CR);
+  const lx = g.obs.length ? g.obs[g.obs.length - 1].x : -1;
+  if (!g.obs.length || lx < W - g.gap) wave();
+
+  if (g.ground && (held || buf > 0)) { g.vy = JMIN; g.ground = false; g.hold = 0; buf = 0; sfx.jump(); }
+  buf = Math.max(0, buf - 1);
+  if (held && !g.ground && g.vy < 0 && g.hold < MAXH) { g.vy -= BOOST; g.hold++; }
+
+  const prev = g.y + PL;
+  g.vy += G; g.y += g.vy; g.ground = false;
+  if (g.y >= GY - PL) { g.y = GY - PL; g.vy = 0; g.ground = true; }
+
+  const l = PX + 6, r = PX + PL - 6;
+  for (const o of g.obs) {
+    if (r > o.x && l < o.x + o.w && g.vy >= 0 && prev <= o.y + 2 && g.y + PL >= o.y) {
+      g.y = o.y - PL; g.vy = 0; g.ground = true;
+    }
+  }
+
+  if (g.ground) {
+    const t = Math.round(g.angle / 90) * 90;
+    g.angle += (t - g.angle) * .4;
+    if (Math.abs(t - g.angle) < .5) g.angle = ((t % 360) + 360) % 360;
+  } else g.angle += ROT;
+
+  const pr = {x: PX, y: g.y, w: PL, h: PL};
+  const hb = {x: PX + 6, y: g.y + 6, w: PL - 12, h: PL - 12};
+  for (const o of g.obs) if (hit(hb, o)) {
+    g.alive = false; held = false; g.dead = performance.now(); sfx.die();
+    best = Math.max(best, Math.floor(g.score)); save();
+  }
+  g.coins = g.coins.filter(c => {
+    if (hit(pr, {x: c.x - CR, y: c.y - CR, w: CR * 2, h: CR * 2})) { g.run++; total++; save(); sfx.coin(); return false; }
+    return true;
+  });
+  g.score += 1 / 6;
+}
+
+function rr(x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
+
+function draw(t) {
+  ctx.fillStyle = P.sky; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = P.ground; ctx.fillRect(0, GY, W, H - GY);
+  ctx.fillStyle = P.grass; ctx.fillRect(0, GY, W, U * .02);
+
+  for (const o of g.obs) { ctx.fillStyle = o.y + o.h < GY - 2 ? P.fl : P.obs; rr(o.x, o.y, o.w, o.h, 6); ctx.fill(); }
+
+  for (const c of g.coins) {
+    const cw = Math.max(3, CR * 2 * Math.abs(Math.cos(t / 1000 * 4 + c.ph)));
+    ctx.beginPath(); ctx.ellipse(c.x, c.y, cw / 2, CR, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffcd00'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#be8200'; ctx.stroke();
+  }
+
+  const cx = PX + PL / 2, cy = g.y + PL / 2;
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(g.angle * Math.PI / 180);
+  rr(-PL / 2, -PL / 2, PL, PL, 10); ctx.fillStyle = '#ff7828'; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#be4608'; ctx.stroke();
+  ctx.restore();
+  // глаза не вращаются
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(PX + PL * .75, g.y + PL / 3, PL / 7, 0, 7); ctx.fill();
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(PX + PL * .8, g.y + PL / 3, PL / 14, 0, 7); ctx.fill();
+
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left'; ctx.font = 'bold ' + U * .06 + 'px system-ui, sans-serif';
+  ctx.fillStyle = P.text; ctx.fillText('Счёт: ' + Math.floor(g.score) + '   Рекорд: ' + best, U * .04, U * .04);
+  ctx.fillStyle = P.coinText; ctx.fillText('Монеты: ' + g.run + '   Всего: ' + total, U * .04, U * .04 + U * .08);
+
+  const mb = muteRect();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = mb.h * .8 + 'px system-ui, sans-serif';
+  ctx.fillText(muted ? '🔇' : '🔊', mb.x + mb.w / 2, mb.y + mb.h / 2);
+  ctx.textBaseline = 'top';
+  if (!g.started) {
+    ctx.fillStyle = P.text; ctx.font = 'bold ' + U * .07 + 'px system-ui, sans-serif';
+    ctx.fillText('Тапни, чтобы начать', W / 2, H * .38);
+    ctx.font = U * .045 + 'px system-ui, sans-serif';
+    ctx.fillText('Зажми, чтобы прыгать выше', W / 2, H * .38 + U * .1);
+  } else if (!g.alive) {
+    ctx.fillStyle = '#d62828'; ctx.font = 'bold ' + U * .13 + 'px system-ui, sans-serif';
+    ctx.fillText('Game Over', W / 2, H * .34);
+    ctx.fillStyle = P.text; ctx.font = U * .05 + 'px system-ui, sans-serif';
+    ctx.fillText('Тапни, чтобы играть снова', W / 2, H * .34 + U * .17);
+  }
+}
+
+function press(e) {
+  if (e) e.preventDefault();
+  audio();
+  if (e && e.type === 'pointerdown' && inMute(e)) {
+    muted = !muted;
+    try { localStorage.setItem('runner_mute', muted ? '1' : '0'); } catch (err) {}
+    return;
+  }
+  if (!g.started) g.started = true;
+  if (g.alive) { held = true; buf = 6; }
+  else if (performance.now() - g.dead > 350) { g = newGame(); g.started = true; held = false; buf = 0; }
+}
+function release() { held = false; g.hold = MAXH; }
+
+cv.addEventListener('pointerdown', press);
+addEventListener('pointerup', release);
+addEventListener('pointercancel', release);
+addEventListener('keydown', e => { if ((e.code === 'Space' || e.code === 'ArrowUp') && !e.repeat) press(e); });
+addEventListener('keyup', e => { if (e.code === 'Space' || e.code === 'ArrowUp') release(); });
+addEventListener('resize', resize);
+
+let lastT = 0, acc = 0;
+function frame(t) {
+  acc += Math.min(100, t - (lastT || t)); lastT = t;
+  while (acc >= 16.667) { step(); acc -= 16.667; }
+  draw(t);
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
